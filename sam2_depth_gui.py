@@ -1795,11 +1795,15 @@ with gr.Blocks(title="SAM2 depth masker") as demo:
                      snap_tol]  # order matches SET_KEYS
     PROMPT_OUT = [viewer, frame_info, table, scope_dd, status_log]
 
+    # show_progress="hidden" keeps the previous image on screen until the
+    # new one arrives -- no gray "loading" flash while scrubbing or tuning.
     for comp in VIEW:
-        comp.change(refresh, VIEW, [viewer, frame_info])
+        comp.change(refresh, VIEW, [viewer, frame_info],
+                    show_progress="hidden")
     for btn, delta in ((btn_m10, -10), (btn_m1, -1),
                        (btn_p1, 1), (btn_p10, 10)):
-        btn.click(_nav(delta), [frame_slider], [frame_slider])
+        btn.click(_nav(delta), [frame_slider], [frame_slider],
+                  show_progress="hidden")
 
     load_btn.click(load_videos,
                    [rgb_in, depth_in, ghost_sl, view_radio, show_chk,
@@ -1808,7 +1812,8 @@ with gr.Blocks(title="SAM2 depth masker") as demo:
                     scope_dd])
 
     viewer.select(on_click,
-                  VIEW + [obj_id, label_radio, scope_dd] + SAM, PROMPT_OUT)
+                  VIEW + [obj_id, label_radio, scope_dd] + SAM, PROMPT_OUT,
+                  show_progress="minimal")
     new_obj_btn.click(new_object, None, [obj_id])
     undo_btn.click(undo_point, VIEW + [scope_dd] + SAM, PROMPT_OUT)
     del_btn.click(delete_selected, VIEW + [scope_dd] + SAM, PROMPT_OUT)
@@ -1820,12 +1825,13 @@ with gr.Blocks(title="SAM2 depth masker") as demo:
     cancel_btn.click(cancel_op, None, [status_log])
     split_btn.click(split_now, VIEW, [viewer, frame_info, status_log])
 
-    scope_dd.change(on_scope, [scope_dd], setting_comps)
+    scope_dd.change(on_scope, [scope_dd], setting_comps,
+                    show_progress="hidden")
     clear_ovr_btn.click(clear_override, [scope_dd] + VIEW,
                         setting_comps + [viewer, frame_info, status_log])
     for comp in setting_comps:
         comp.input(on_setting_change, [scope_dd] + setting_comps + VIEW,
-                   [viewer, frame_info])
+                   [viewer, frame_info], show_progress="hidden")
 
     hist_btn.click(depth_histogram, [frame_slider], [hist_img])
     prev_clip_btn.click(overlay_clip,
