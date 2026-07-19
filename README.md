@@ -32,8 +32,8 @@ Everything runs locally (Gradio at `http://127.0.0.1:7860`), nothing is uploaded
 ## Install
 
 ```bat
-git clone <this-repo>
-cd DepthyGUI
+git clone https://github.com/enoky/DepthEditorGUI.git
+cd DepthEditorGUI
 py -m venv .venv
 .venv\scripts\activate
 py -m pip install -r requirements.txt
