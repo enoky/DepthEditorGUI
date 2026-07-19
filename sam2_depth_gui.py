@@ -22,9 +22,10 @@ Workflow (top to bottom in the UI):
      frame, "erase (click)" is a single-frame background (-) click (SAM2
      carves the clicked region out of the tracked mask without a
      re-track), and both re-apply after every re-track.
-  4. Switch the view to "Depth before | after", pick a mode (brightness /
-     compress / inpaint) and tune sliders with instant single-frame preview. Settings
-     can be overridden per object; the histogram helps pick thresholds.
+  4. Switch the view to "Depth before | after" and tune the brightness
+     treatment (factor < 1 dims, > 1 brightens) with instant single-frame
+     preview. Settings can be overridden per object; the histogram shows
+     the masked pixels' depth distribution.
      "Snap to depth" grows each mask into adjacent pixels of similar depth
      value, so masks conform to the depth object's silhouette even where
      DepthCrafter's blobs overhang the RGB outline.
@@ -79,21 +80,19 @@ import numpy as np
 CONFIG_PATH = Path(__file__).with_name("s2dm_config.json")
 
 DEFAULTS = {
-    "mode": "brightness", "brightness": 0.5, "threshold": 140, "gain": 0.35,
-    "inpaint_radius": 5, "dilate_px": 2, "feather_px": 4,
+    "brightness": 0.5, "dilate_px": 2, "feather_px": 4,
     "snap_px": 0, "snap_tol": 12,
 }
 SET_KEYS = tuple(DEFAULTS)  # order matters: must match setting_comps below
 
 
 def _migrate_settings(st: dict) -> dict:
-    """Accept settings saved before 'dim' became the 'brightness' mode."""
+    """Accept settings saved by older versions (dim / compress / inpaint
+    eras); unknown keys are dropped."""
     st = dict(st)
-    if st.get("mode") == "dim":
-        st["mode"] = "brightness"
     if "dim_factor" in st:
         st.setdefault("brightness", st.pop("dim_factor"))
-    return st
+    return {k: v for k, v in st.items() if k in DEFAULTS}
 
 DEFAULT_SCOPE = "default (all objects)"
 
@@ -665,25 +664,12 @@ def snap_mask_to_depth(mask: np.ndarray, gray: np.ndarray,
     return out
 
 
-def apply_mode(gray: np.ndarray, feathered: np.ndarray, mode: str,
-               brightness: float, threshold: float, gain: float,
-               inpaint_radius: int) -> np.ndarray:
-    """gray is uint16 (16-bit scale); threshold stays in 8-bit slider units."""
+def apply_brightness(gray: np.ndarray, feathered: np.ndarray,
+                     brightness: float) -> np.ndarray:
+    """Scale the masked depth (uint16, 16-bit scale) by the brightness
+    factor, blended through the feathered mask edge."""
     d = gray.astype(np.float32)
-    if mode == "brightness":
-        target = d * brightness
-    elif mode == "compress":
-        thr = float(threshold) * 257.0
-        target = np.where(d > thr, thr + (d - thr) * gain, d)
-    else:  # inpaint (cv2.inpaint is 8-bit only; the fill is synthetic anyway)
-        hard = (feathered > 0.5).astype(np.uint8) * 255
-        if hard.any():
-            g8 = (gray >> 8).astype(np.uint8)
-            target = cv2.inpaint(g8, hard, int(inpaint_radius),
-                                 cv2.INPAINT_TELEA).astype(np.float32) * 257.0
-        else:
-            target = d
-    out = d * (1.0 - feathered) + target * feathered
+    out = d * (1.0 - feathered) + d * brightness * feathered
     return np.clip(out + 0.5, 0, 65535).astype(np.uint16)
 
 
@@ -700,8 +686,7 @@ def process_depth(gray: np.ndarray, idx: int) -> tuple[np.ndarray, np.ndarray | 
             m = snap_mask_to_depth(m, orig, int(st["snap_px"]),
                                    float(st.get("snap_tol", 12)) * 257.0)
         f = feather_one(m, int(st["dilate_px"]), int(st["feather_px"]))
-        gray = apply_mode(gray, f, st["mode"], st["brightness"],
-                          st["threshold"], st["gain"], int(st["inpaint_radius"]))
+        gray = apply_brightness(gray, f, st["brightness"])
         matte = f if matte is None else np.maximum(matte, f)
     return gray, matte
 
@@ -1367,11 +1352,9 @@ def run_tracking(idx, view, show_masks, opacity, outline,
 # --- depth treatment settings ------------------------------------------------
 
 
-def on_setting_change(scope, mode_v, brt, thr, gain_v, inpr, dil, fea,
-                      snapg, snapt, idx, view, show_masks, opacity, outline):
-    vals = {"mode": mode_v, "brightness": float(brt),
-            "threshold": float(thr), "gain": float(gain_v),
-            "inpaint_radius": int(inpr), "dilate_px": int(dil),
+def on_setting_change(scope, brt, dil, fea, snapg, snapt,
+                      idx, view, show_masks, opacity, outline):
+    vals = {"brightness": float(brt), "dilate_px": int(dil),
             "feather_px": int(fea), "snap_px": int(snapg),
             "snap_tol": float(snapt)}
     o = _scope_obj(scope)
@@ -1382,10 +1365,15 @@ def on_setting_change(scope, mode_v, brt, thr, gain_v, inpr, dil, fea,
     return refresh(idx, view, show_masks, opacity, outline)
 
 
+def _setting_updates(st: dict) -> tuple:
+    """Value updates for setting_comps (order = SET_KEYS)."""
+    return tuple(gr.update(value=st[k]) for k in SET_KEYS)
+
+
 def on_scope(scope):
     o = _scope_obj(scope)
     st = settings_for(o) if o is not None else S["settings"]
-    return tuple(gr.update(value=st[k]) for k in SET_KEYS)
+    return _setting_updates(st)
 
 
 def clear_override(scope, idx, view, show_masks, opacity, outline):
@@ -1395,7 +1383,7 @@ def clear_override(scope, idx, view, show_masks, opacity, outline):
     elif S["obj_settings"].pop(o, None) is not None:
         log(f"Removed treatment override for object {o} (uses default now).")
     st = settings_for(o) if o is not None else S["settings"]
-    return (*[gr.update(value=st[k]) for k in SET_KEYS],
+    return (*_setting_updates(st),
             *refresh(idx, view, show_masks, opacity, outline), log_md())
 
 
@@ -1422,10 +1410,6 @@ def depth_histogram(idx):
         cv2.putText(img, "no mask on this frame", (150, H // 2),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1,
                     cv2.LINE_AA)
-    thr = int(S["settings"]["threshold"])
-    cv2.line(img, (thr * 2, 0), (thr * 2, H), (255, 80, 80), 1)
-    cv2.putText(img, f"thr {thr}", (min(thr * 2 + 5, W - 70), 14),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 80, 80), 1, cv2.LINE_AA)
     cv2.putText(img, "gray = whole frame   amber = masked pixels "
                      "(each normalized)", (6, H + 18),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.42, (180, 180, 180), 1,
@@ -1618,7 +1602,7 @@ def load_project(path, idx, view, show_masks, opacity, outline,
     return (log_md(),
             *refresh(idx, view, show_masks, opacity, outline),
             prompts_table(), scope_dd_update(),
-            *[gr.update(value=S["settings"][k]) for k in SET_KEYS])
+            *_setting_updates(S["settings"]))
 
 
 # ----------------------------------------------------------------------------
@@ -1653,8 +1637,8 @@ def _nav(delta: int):
 
 with gr.Blocks(title="SAM2 depth masker") as demo:
     gr.Markdown("## SAM2 depth masker\n"
-                "Track objects in the RGB video, then brighten/dim, "
-                "compress or inpaint them in the matching depth-map video. "
+                "Track objects in the RGB video, then brighten or dim "
+                "them in the matching depth-map video. "
                 "Keyboard: **←/→** step 1 frame, **Shift+←/→** step 10.")
 
     def _file_label(step: str, key: str) -> str:
@@ -1763,19 +1747,10 @@ with gr.Blocks(title="SAM2 depth masker") as demo:
                                        value=DEFAULT_SCOPE,
                                        label="Settings for", scale=2)
                 clear_ovr_btn = gr.Button("Remove override")
-            mode = gr.Radio(["brightness", "compress", "inpaint"],
-                            value=S["settings"]["mode"], label="Mode")
             brightness = gr.Slider(0.0, 2.0, value=S["settings"]["brightness"],
                                    step=0.05,
                                    label="brightness: factor "
                                          "(<1 dims, >1 brightens)")
-            threshold = gr.Slider(0, 255, value=S["settings"]["threshold"],
-                                  step=1, label="compress: threshold (8-bit)")
-            gain = gr.Slider(0.0, 1.0, value=S["settings"]["gain"], step=0.05,
-                             label="compress: gain above threshold")
-            inpaint_radius = gr.Slider(1, 15,
-                                       value=S["settings"]["inpaint_radius"],
-                                       step=1, label="inpaint: radius")
             dilate_px = gr.Slider(0, 20, value=S["settings"]["dilate_px"],
                                   step=1, label="mask dilation (px)")
             feather_px = gr.Slider(0, 30, value=S["settings"]["feather_px"],
@@ -1816,8 +1791,7 @@ with gr.Blocks(title="SAM2 depth masker") as demo:
 
     VIEW = [frame_slider, view_radio, show_chk, opacity_sl, outline_chk]
     SAM = [ckpt, cfg_in, offload]
-    setting_comps = [mode, brightness, threshold, gain, inpaint_radius,
-                     dilate_px, feather_px, snap_px,
+    setting_comps = [brightness, dilate_px, feather_px, snap_px,
                      snap_tol]  # order matches SET_KEYS
     PROMPT_OUT = [viewer, frame_info, table, scope_dd, status_log]
 
