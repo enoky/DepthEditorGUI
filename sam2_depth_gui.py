@@ -19,8 +19,9 @@ Workflow (top to bottom in the UI):
      Objects that cross paths are kept mutually exclusive (overlapping
      pixels are split by nearest-object / motion continuity after each
      run); "erase (box)" cuts mistakes out of one object's mask on one
-     frame, "erase (click a blob)" deletes a whole stray blob with a
-     single click, and both re-apply after every re-track.
+     frame, "erase (click)" is a single-frame background (-) click (SAM2
+     carves the clicked region out of the tracked mask without a
+     re-track), and both re-apply after every re-track.
   4. Switch the view to "Depth before | after", pick a mode (brightness /
      compress / inpaint) and tune sliders with instant single-frame preview. Settings
      can be overridden per object; the histogram helps pick thresholds.
@@ -264,7 +265,56 @@ def _apply_erase_click(p: dict) -> int:
     return int(blob.sum())
 
 
-def apply_erases() -> int:
+def _sam_refine_erase(p: dict, ckpt: str, cfg: str, offload: bool):
+    """SAM2 single-frame carve: like a background (-) click, but only for
+    this frame's stored mask. The tracked mask is fed back to SAM2 as a mask
+    prompt and the click as a negative point; SAM2 re-segments and the
+    refined mask replaces this frame only. Returns net pixels removed, or
+    None if SAM2 could not run (caller falls back to blob erase).
+    """
+    m = _unpack(p["obj"], p["frame"])
+    if m is None or not m.any():
+        return None
+    try:
+        get_predictor(ckpt, cfg, offload)
+        rw, rh = S["rgb_size"]
+        dw, dh = S["depth_size"]
+        seed = cv2.resize(m.astype(np.uint8), (rw, rh),
+                          interpolation=cv2.INTER_NEAREST).astype(bool)
+        # A lone negative point erases everything -- SAM needs to be told
+        # where the object still IS. Anchor a positive point at the mask's
+        # deep interior, as far from the click as possible.
+        dt = cv2.distanceTransform(m.astype(np.uint8), cv2.DIST_L2, 3)
+        ys, xs = np.nonzero(m)
+        cx, cy = p["x"] * dw / rw, p["y"] * dh / rh
+        k = int(np.argmax(dt[ys, xs] * np.hypot(xs - cx, ys - cy)))
+        anchor = (xs[k] * rw / dw, ys[k] * rh / dh)
+        pred, state = S["predictor"], S["state"]
+        before = int(m.sum())
+        with sam_run():
+            pred.reset_state(state)
+            S["state_tracked"] = False
+            pred.add_new_mask(state, p["frame"], int(p["obj"]), seed)
+            f, ids, logits = pred.add_new_points_or_box(
+                inference_state=state, frame_idx=p["frame"],
+                obj_id=int(p["obj"]),
+                points=np.array([anchor, [p["x"], p["y"]]], np.float32),
+                labels=np.array([1, 0], np.int32),
+                clear_old_points=False)
+            _absorb(f, ids, logits, or_merge=False,
+                    only_objs={int(p["obj"])})
+        after = _unpack(p["obj"], p["frame"])
+        refresh_prompt_state(ckpt, cfg, offload, absorb=False)
+        return before - int(0 if after is None else after.sum())
+    except Exception as e:
+        log(f"SAM2 erase-carve failed ({type(e).__name__}: {e}) -- falling "
+            "back to deleting the connected blob.")
+        traceback.print_exc()
+        return None
+
+
+def apply_erases(ckpt: str | None = None, cfg: str | None = None,
+                 offload: bool = False) -> int:
     """Re-apply every stored erase (after tracking); returns erase count."""
     n = 0
     for p in S["prompts"]:
@@ -272,7 +322,11 @@ def apply_erases() -> int:
             _apply_erase(p)
             n += 1
         elif p["kind"] == "erase_click":
-            _apply_erase_click(p)
+            done = None
+            if ckpt is not None and not S["preview_failed"]:
+                done = _sam_refine_erase(p, ckpt, cfg, offload)
+            if done is None:
+                _apply_erase_click(p)
             n += 1
     return n
 
@@ -1058,10 +1112,18 @@ def on_click(idx, view, show_masks, opacity, outline, obj, add_mode, scope,
             p = {"kind": "erase_click", "obj": o, "frame": idx,
                  "x": x, "y": y}
             S["prompts"].append(p)
-            n_px = _apply_erase_click(p)
-            log(f"Erased a {n_px} px blob of object {o} on frame {idx}. "
-                "The erase click is kept and re-applied after every "
-                "tracking run (delete its row to stop).")
+            removed = None
+            if not S["preview_failed"]:
+                removed = _sam_refine_erase(p, ckpt, cfg, offload)
+            if removed is None:
+                n_px = _apply_erase_click(p)
+                log(f"Erased the {n_px} px connected blob of object {o} on "
+                    f"frame {idx} (SAM2 unavailable for a finer carve). "
+                    "Kept and re-applied after every tracking run.")
+            else:
+                log(f"SAM2 carved {removed} px off object {o} on frame "
+                    f"{idx} around the click. Kept and re-applied after "
+                    "every tracking run (delete its row to stop).")
     elif add_mode.startswith(("box", "erase")):
         pb = S["pending_box"]
         if pb and pb["obj"] == obj and pb["frame"] == idx:
@@ -1271,7 +1333,7 @@ def run_tracking(idx, view, show_masks, opacity, outline,
 
         fixes_txt = ""
         if not cancelled:
-            n_er = apply_erases()
+            n_er = apply_erases(ckpt, cfg, offload)
             n_split = split_overlaps()
             if n_er:
                 fixes_txt += f" {n_er} erase box(es) re-applied."
@@ -1641,17 +1703,19 @@ with gr.Blocks(title="SAM2 depth masker") as demo:
                         "two opposite corners. The mask preview appears "
                         "instantly. 'erase (box)' cuts pixels out of the "
                         "current object's mask on the current frame only; "
-                        "'erase (click a blob)' removes the whole connected "
-                        "blob under one click (any object). Both are saved "
-                        "and re-applied after every tracking run. Masks of "
-                        "crossing objects are kept mutually exclusive "
-                        "automatically after tracking.")
+                        "'erase (click)' works like a background (-) click "
+                        "but for one frame only -- SAM2 carves the clicked "
+                        "region out of the tracked mask (any object, no "
+                        "re-track needed). Both are saved and re-applied "
+                        "after every tracking run. Masks of crossing "
+                        "objects are kept mutually exclusive automatically "
+                        "after tracking.")
             with gr.Row():
                 obj_id = gr.Number(value=1, precision=0, label="Object ID")
                 new_obj_btn = gr.Button("New object")
                 label_radio = gr.Radio(
                     ["object (+)", "background (-)", "box (2 clicks)",
-                     "erase (box, this frame)", "erase (click a blob)"],
+                     "erase (box, this frame)", "erase (click, this frame)"],
                     value="object (+)", label="Click adds", scale=2)
             with gr.Row():
                 undo_btn = gr.Button("Undo last")
