@@ -12,7 +12,7 @@ Everything runs locally (Gradio at `http://127.0.0.1:7860`), nothing is uploaded
 
 - **Click-to-mask prompting** on the RGB video: positive/negative points and 2-click boxes, multiple objects with per-object IDs and colors, instant single-frame mask previews, corrective clicks.
 - **Bidirectional SAM2 video tracking** from any prompt frame; objects prompted on different frames are propagated in separate clean passes. Per-object re-tracking.
-- **Crossing-object handling**: after tracking, per-frame masks are kept mutually exclusive — a mask fully swallowed by another object's blob (the classic SAM2 "merge") gets its area back automatically; partial overlaps are split by proximity with motion continuity. Plus an **erase-box** click mode for surgical frame-by-frame fixes that survive re-tracking.
+- **Crossing-object handling**: after tracking, per-frame masks are kept mutually exclusive — a mask fully swallowed by another object's blob (the classic SAM2 "merge") gets its area back automatically; partial overlaps are split by proximity with motion continuity. Plus **erase modes** for surgical frame-by-frame fixes that survive re-tracking: an erase box, and a single-click blob erase that deletes a whole stray fragment (auto-detects which object it belongs to).
 - **Snap to depth**: SAM2 masks follow RGB silhouettes, which rarely match the depth blobs exactly. An edge-aware grow (geodesic dilation + marker watershed) expands each mask to the depth object's true outline — without leaking into occluders like walls whose gray value happens to be similar.
 - **Depth ghost**: optionally blend a TURBO-colormapped copy of the depth video into the frames SAM2 sees, so depth boundaries become color edges the tracker can latch onto. Handles depth videos at lower resolution / different aspect ratio than the RGB. Mask overlay colors automatically switch to hues the colormap never produces.
 - **Depth treatments**, tunable live in a before|after view, globally or per object: **brightness** (dim or brighten), **compress** (soft-limit values above a threshold), **inpaint** (remove the object entirely). Mask dilation + feather controls and a depth histogram of the masked pixels.
@@ -32,8 +32,8 @@ Everything runs locally (Gradio at `http://127.0.0.1:7860`), nothing is uploaded
 ## Install
 
 ```bat
-git clone https://github.com/enoky/DepthEditorGUI.git
-cd DepthEditorGUI
+git clone <this-repo>
+cd DepthyGUI
 py -m venv .venv
 .venv\scripts\activate
 py -m pip install -r requirements.txt
@@ -57,7 +57,7 @@ or, with the venv active, `python sam2_depth_gui.py`. A browser tab opens at `ht
 
 1. **Load** the RGB video and the matching depth video. Optionally set **depth ghost (%)** first (try 25–35) to blend colormapped depth into the frames SAM2 sees.
 2. **Prompt**: scrub to a clear frame and click each object (or box it). Background (−) clicks fix over-segmentation. Each object gets its own ID — use *New object* between vehicles.
-3. **Track objects** (SAM2 propagates forwards and backwards). Scrub or render a preview clip to verify; add corrective clicks where it drifts and track again. Fix crossing-object mistakes with *Split overlapping masks* or the *erase (box)* mode.
+3. **Track objects** (SAM2 propagates forwards and backwards). Scrub or render a preview clip to verify; add corrective clicks where it drifts and track again. Fix crossing-object mistakes with *Split overlapping masks*, the *erase (box)* mode, or *erase (click a blob)* for stray fragments.
 4. **Depth treatment**: switch the view to *Depth before | after*, pick a mode and tune. If bright rims of the depth blob survive outside the mask, raise **snap to depth: max grow** — it hugs the depth object's real outline instead of dilating blindly. Settings can be overridden per object.
 5. **Render**. Existing files get a numeric suffix instead of being overwritten. Optionally export the mask matte for compositing.
 

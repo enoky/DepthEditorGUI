@@ -18,8 +18,9 @@ Workflow (top to bottom in the UI):
      verify; add corrective points where it drifts and track again.
      Objects that cross paths are kept mutually exclusive (overlapping
      pixels are split by nearest-object / motion continuity after each
-     run); "erase (box)" mode cuts mistakes out of one object's mask on
-     one frame, and such boxes re-apply after every re-track.
+     run); "erase (box)" cuts mistakes out of one object's mask on one
+     frame, "erase (click a blob)" deletes a whole stray blob with a
+     single click, and both re-apply after every re-track.
   4. Switch the view to "Depth before | after", pick a mode (brightness /
      compress / inpaint) and tune sliders with instant single-frame preview. Settings
      can be overridden per object; the histogram helps pick thresholds.
@@ -245,12 +246,33 @@ def _apply_erase(p: dict) -> int:
     return n
 
 
+def _apply_erase_click(p: dict) -> int:
+    """Erase the connected mask blob under the click; returns pixels removed."""
+    m = _unpack(p["obj"], p["frame"])
+    if m is None or not m.any():
+        return 0
+    dw, dh = S["depth_size"]
+    rw, rh = S["rgb_size"]
+    px = int(p["x"] * dw / rw)
+    py = int(p["y"] * dh / rh)
+    if not (0 <= px < dw and 0 <= py < dh) or not m[py, px]:
+        return 0
+    _, lbl = cv2.connectedComponents(m.astype(np.uint8))
+    blob = lbl == lbl[py, px]
+    m &= ~blob
+    S["masks"][p["obj"]][p["frame"]] = _pack(m)
+    return int(blob.sum())
+
+
 def apply_erases() -> int:
-    """Re-apply every stored erase box (after tracking); returns box count."""
+    """Re-apply every stored erase (after tracking); returns erase count."""
     n = 0
     for p in S["prompts"]:
         if p["kind"] == "erase":
             _apply_erase(p)
+            n += 1
+        elif p["kind"] == "erase_click":
+            _apply_erase_click(p)
             n += 1
     return n
 
@@ -676,7 +698,7 @@ def sam_run():
 def prompt_groups() -> dict:
     groups: dict[tuple[int, int], dict] = {}
     for p in S["prompts"]:
-        if p["kind"] == "erase":  # mask edits, not SAM2 prompts
+        if p["kind"].startswith("erase"):  # mask edits, not SAM2 prompts
             continue
         g = groups.setdefault((p["obj"], p["frame"]),
                               {"points": [], "labels": [], "box": None})
@@ -806,7 +828,14 @@ def overlay_rgb(idx: int, show_masks: bool, opacity: float,
         if p["frame"] != idx:
             continue
         col = _color(p["obj"])
-        if p["kind"] == "erase":
+        if p["kind"] == "erase_click":
+            c = (int(p["x"]), int(p["y"]))
+            cv2.drawMarker(img, c, (255, 60, 60), cv2.MARKER_TILTED_CROSS,
+                           14, 2)
+            cv2.putText(img, f"erase {p['obj']}", (c[0] + 8, c[1] - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 60, 60), 1,
+                        cv2.LINE_AA)
+        elif p["kind"] == "erase":
             x1, y1, x2, y2 = (int(p["x1"]), int(p["y1"]),
                               int(p["x2"]), int(p["y2"]))
             cv2.rectangle(img, (x1, y1), (x2, y2), (255, 60, 60), 2)
@@ -874,6 +903,9 @@ def prompts_table():
             rows.append([p["obj"], p["frame"],
                          f"{p['x1']:.0f}-{p['x2']:.0f}",
                          f"{p['y1']:.0f}-{p['y2']:.0f}", p["kind"]])
+        elif p["kind"] == "erase_click":
+            rows.append([p["obj"], p["frame"], f"{p['x']:.0f}",
+                         f"{p['y']:.0f}", "erase click"])
         else:
             rows.append([p["obj"], p["frame"], f"{p['x']:.0f}",
                          f"{p['y']:.0f}",
@@ -1009,7 +1041,28 @@ def on_click(idx, view, show_masks, opacity, outline, obj, add_mode, scope,
     idx, obj = int(idx), int(obj)
     x, y = float(evt.index[0]), float(evt.index[1])
 
-    if add_mode.startswith(("box", "erase")):
+    if add_mode.startswith("erase (click"):
+        dw, dh = S["depth_size"]
+        rw, rh = S["rgb_size"]
+        px, py = int(x * dw / rw), int(y * dh / rh)
+        owners = []
+        if 0 <= px < dw and 0 <= py < dh:
+            for o in sorted(S["masks"]):
+                mo = _unpack(o, idx)
+                if mo is not None and mo[py, px]:
+                    owners.append(o)
+        if not owners:
+            gr.Warning("No mask under that click on this frame.")
+        else:
+            o = obj if obj in owners else owners[0]
+            p = {"kind": "erase_click", "obj": o, "frame": idx,
+                 "x": x, "y": y}
+            S["prompts"].append(p)
+            n_px = _apply_erase_click(p)
+            log(f"Erased a {n_px} px blob of object {o} on frame {idx}. "
+                "The erase click is kept and re-applied after every "
+                "tracking run (delete its row to stop).")
+    elif add_mode.startswith(("box", "erase")):
         pb = S["pending_box"]
         if pb and pb["obj"] == obj and pb["frame"] == idx:
             x1, x2 = sorted((pb["x"], x))
@@ -1053,9 +1106,10 @@ def on_click(idx, view, show_masks, opacity, outline, obj, add_mode, scope,
 
 def _drop_prompt(index: int, ckpt, cfg, offload) -> None:
     p = S["prompts"].pop(index)
-    if p["kind"] == "erase":
-        log(f"Removed erase box (object {p['obj']}, frame {p['frame']}) -- "
-            "the erased pixels come back after the next tracking run.")
+    if p["kind"].startswith("erase"):
+        log(f"Removed {p['kind'].replace('_', ' ')} (object {p['obj']}, "
+            f"frame {p['frame']}) -- the erased pixels come back after the "
+            "next tracking run.")
         return
     key = (p["obj"], p["frame"])
     refresh_prompt_state(ckpt, cfg, offload)
@@ -1138,7 +1192,8 @@ def cancel_op():
 def run_tracking(idx, view, show_masks, opacity, outline,
                  ckpt, cfg, offload, track_obj, progress=gr.Progress()):
     require_loaded()
-    sam_prompts = [p for p in S["prompts"] if p["kind"] != "erase"]
+    sam_prompts = [p for p in S["prompts"]
+                   if not p["kind"].startswith("erase")]
     if not sam_prompts:
         raise gr.Error("Click at least one point or box on an object first "
                        "(erase boxes alone don't define objects).")
@@ -1585,16 +1640,18 @@ with gr.Blocks(title="SAM2 depth masker") as demo:
                         "(-) clicks fix over-segmentation; box mode = click "
                         "two opposite corners. The mask preview appears "
                         "instantly. 'erase (box)' cuts pixels out of the "
-                        "current object's mask on the current frame only -- "
-                        "erase boxes are saved and re-applied after every "
-                        "tracking run. Masks of crossing objects are kept "
-                        "mutually exclusive automatically after tracking.")
+                        "current object's mask on the current frame only; "
+                        "'erase (click a blob)' removes the whole connected "
+                        "blob under one click (any object). Both are saved "
+                        "and re-applied after every tracking run. Masks of "
+                        "crossing objects are kept mutually exclusive "
+                        "automatically after tracking.")
             with gr.Row():
                 obj_id = gr.Number(value=1, precision=0, label="Object ID")
                 new_obj_btn = gr.Button("New object")
                 label_radio = gr.Radio(
                     ["object (+)", "background (-)", "box (2 clicks)",
-                     "erase (box, this frame)"],
+                     "erase (box, this frame)", "erase (click a blob)"],
                     value="object (+)", label="Click adds", scale=2)
             with gr.Row():
                 undo_btn = gr.Button("Undo last")
