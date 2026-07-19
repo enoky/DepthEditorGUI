@@ -4,7 +4,7 @@ A local, single-file browser GUI for cleaning up **depth-map videos** (e.g. [Dep
 
 Typical use case: a shot contains objects (drones, birds, flying vehicles, foreground clutter) that punch bright "near" blobs into an otherwise clean depth map. You click them once in the RGB clip, SAM2 tracks them through the whole shot, and the tool re-renders the depth video with those objects pushed back, flattened, or removed — at full 10-bit precision.
 
-<!-- screenshot: docs/screenshot.png -->
+<img src="docs/screenshot.jpg">
 
 Everything runs locally (Gradio at `http://127.0.0.1:7860`), nothing is uploaded anywhere.
 
