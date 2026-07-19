@@ -1,0 +1,32 @@
+# requirements.txt -- SAM2/SAM3 depth-masking tools (CLI script + Gradio GUIs)
+#
+# PyTorch is pinned to the CUDA 13.0 (cu130) builds. CUDA 13.0 wheels need an
+# NVIDIA driver from the R580 series or newer -- check the driver version in
+# the top line of `nvidia-smi`. If your driver is older, either update it or
+# replace "cu130" with "cu126" in the two places below.
+#
+# Requires Python 3.10+ and Git on PATH (winget install Git.Git) for the
+# SAM-2 line, which installs from GitHub.
+#
+# Install:
+#   py -m pip install -r requirements.txt
+#
+# Recommended (not pip-installable): ffmpeg for the cleanest depth encodes.
+#   winget install Gyan.FFmpeg
+
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+# The +cu130 local tag forces pip to take these from the PyTorch CUDA 13.0
+# index above rather than PyPI. torchvision 0.26.0 is the matching build
+# for torch 2.11.0.
+torch==2.11.0+cu130
+torchvision==0.26.0+cu130
+
+numpy>=1.26,<3
+opencv-python>=4.10
+gradio>=5.0
+
+# SAM2 -- pulls in hydra-core, iopath, tqdm, and pillow as dependencies.
+# The model checkpoint is downloaded separately (~900 MB):
+#   https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
+sam-2 @ git+https://github.com/facebookresearch/sam2.git
